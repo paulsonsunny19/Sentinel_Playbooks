@@ -1,0 +1,383 @@
+#Requires -Version 5.1
+
+$ErrorActionPreference = "Stop"
+
+############################################################
+# Tenant and managed identity
+############################################################
+
+$TenantId   = "" // Change the Tenant ID
+$MIObjectId = "" // Change the Managed Identity Object ID
+
+############################################################
+# Microsoft Graph application permissions
+############################################################
+
+$GraphPermissions = @(
+    "DeviceManagementManagedDevices.Read.All"
+    "User.ReadWrite.All"
+    "Directory.ReadWrite.All"
+    "User.Read.All"
+    "DeviceManagementManagedDevices.ReadWrite.All"
+    "AuditLog.Read.All"
+    "ThreatHunting.Read.All"
+)
+
+############################################################
+# Microsoft Defender for Endpoint application permissions
+############################################################
+
+$DefenderPermissions = @(
+    "Machine.Scan"
+    "Machine.ReadWrite.All"
+    "Vulnerability.Read.All"
+    "AdvancedQuery.Read.All"
+)
+
+############################################################
+# Required Microsoft Graph modules
+############################################################
+
+$RequiredModules = @(
+    "Microsoft.Graph.Authentication"
+    "Microsoft.Graph.Applications"
+)
+
+foreach ($Module in $RequiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $Module)) {
+        Write-Host "Installing $Module..." -ForegroundColor Yellow
+
+        Install-Module `
+            -Name $Module `
+            -Scope CurrentUser `
+            -Repository PSGallery `
+            -Force `
+            -AllowClobber
+    }
+
+    Import-Module $Module
+}
+
+############################################################
+# Connect to the target tenant
+############################################################
+
+Write-Host "Connecting to tenant $TenantId..." -ForegroundColor Cyan
+
+Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+
+Connect-MgGraph `
+    -TenantId $TenantId `
+    -Scopes @(
+        "Application.Read.All"
+        "AppRoleAssignment.ReadWrite.All"
+    ) `
+    -NoWelcome
+
+$Context = Get-MgContext
+
+if ($Context.TenantId -ne $TenantId) {
+    throw "Connected to tenant '$($Context.TenantId)' instead of '$TenantId'."
+}
+
+Write-Host "Connected account: $($Context.Account)" -ForegroundColor Green
+Write-Host "Connected tenant:  $($Context.TenantId)" -ForegroundColor Green
+
+############################################################
+# Get managed identity service principal
+############################################################
+
+Write-Host "`nLooking up managed identity..." -ForegroundColor Cyan
+
+$ManagedIdentity = Get-MgServicePrincipal `
+    -ServicePrincipalId $MIObjectId `
+    -Property @(
+        "id"
+        "displayName"
+        "appId"
+        "servicePrincipalType"
+    )
+
+if (-not $ManagedIdentity) {
+    throw "Managed identity service principal '$MIObjectId' was not found."
+}
+
+Write-Host "Managed identity: $($ManagedIdentity.DisplayName)" `
+    -ForegroundColor Green
+Write-Host "Object ID:        $($ManagedIdentity.Id)"
+Write-Host "Type:             $($ManagedIdentity.ServicePrincipalType)"
+
+############################################################
+# Helper function
+############################################################
+
+function Grant-ServicePrincipalAppRoles {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Principal,
+
+        [Parameter(Mandatory)]
+        [object]$ResourceServicePrincipal,
+
+        [Parameter(Mandatory)]
+        [string[]]$Permissions,
+
+        [Parameter(Mandatory)]
+        [string]$ResourceName
+    )
+
+    Write-Host "`nProcessing $ResourceName permissions..." `
+        -ForegroundColor Cyan
+
+    $ExistingAssignments = @(
+        Get-MgServicePrincipalAppRoleAssignment `
+            -ServicePrincipalId $Principal.Id `
+            -All |
+        Where-Object {
+            $_.ResourceId -eq $ResourceServicePrincipal.Id
+        }
+    )
+
+    foreach ($Permission in $Permissions) {
+        try {
+            $MatchingRoles = @(
+                $ResourceServicePrincipal.AppRoles |
+                Where-Object {
+                    $_.Value -eq $Permission -and
+                    $_.IsEnabled -eq $true -and
+                    $_.AllowedMemberTypes -contains "Application"
+                }
+            )
+
+            if ($MatchingRoles.Count -eq 0) {
+                Write-Host (
+                    "{0,-55} {1}" -f $Permission, "Not found"
+                ) -ForegroundColor Red
+
+                continue
+            }
+
+            if ($MatchingRoles.Count -gt 1) {
+                Write-Host (
+                    "{0,-55} {1}" -f $Permission, "Multiple matching roles"
+                ) -ForegroundColor Red
+
+                continue
+            }
+
+            $AppRole = $MatchingRoles[0]
+
+            $ExistingAssignment = $ExistingAssignments |
+                Where-Object {
+                    $_.AppRoleId -eq $AppRole.Id
+                } |
+                Select-Object -First 1
+
+            if ($ExistingAssignment) {
+                Write-Host (
+                    "{0,-55} {1}" -f $Permission, "Already assigned"
+                ) -ForegroundColor Yellow
+
+                continue
+            }
+
+            $Body = @{
+                principalId = $Principal.Id
+                resourceId  = $ResourceServicePrincipal.Id
+                appRoleId   = $AppRole.Id
+            }
+
+            New-MgServicePrincipalAppRoleAssignment `
+                -ServicePrincipalId $Principal.Id `
+                -BodyParameter $Body |
+                Out-Null
+
+            Write-Host (
+                "{0,-55} {1}" -f $Permission, "Assigned"
+            ) -ForegroundColor Green
+
+            # Add it locally so duplicate entries in the input are skipped.
+            $ExistingAssignments += [PSCustomObject]@{
+                AppRoleId = $AppRole.Id
+                ResourceId = $ResourceServicePrincipal.Id
+            }
+        }
+        catch {
+            Write-Host (
+                "{0,-55} Failed: {1}" -f
+                $Permission,
+                $_.Exception.Message
+            ) -ForegroundColor Red
+        }
+    }
+}
+
+############################################################
+# Get Microsoft Graph service principal
+############################################################
+
+$MicrosoftGraphAppId = "00000003-0000-0000-c000-000000000000"
+
+$GraphServicePrincipals = @(
+    Get-MgServicePrincipal `
+        -Filter "appId eq '$MicrosoftGraphAppId'" `
+        -Property @(
+            "id"
+            "appId"
+            "displayName"
+            "appRoles"
+        ) `
+        -All
+)
+
+if ($GraphServicePrincipals.Count -eq 0) {
+    throw "Microsoft Graph service principal was not found."
+}
+
+$GraphServicePrincipal = $GraphServicePrincipals[0]
+
+Write-Host "`nGraph resource: $($GraphServicePrincipal.DisplayName)"
+Write-Host "Graph SP ID:    $($GraphServicePrincipal.Id)"
+
+############################################################
+# Get WindowsDefenderATP service principal
+############################################################
+
+$DefenderServicePrincipals = @(
+    Get-MgServicePrincipal `
+        -Filter "displayName eq 'WindowsDefenderATP'" `
+        -Property @(
+            "id"
+            "appId"
+            "displayName"
+            "appRoles"
+        ) `
+        -All
+)
+
+# Fallback in case the tenant's display name differs slightly.
+if ($DefenderServicePrincipals.Count -eq 0) {
+    $DefenderServicePrincipals = @(
+        Get-MgServicePrincipal `
+            -Filter "startsWith(displayName,'WindowsDefenderATP')" `
+            -Property @(
+                "id"
+                "appId"
+                "displayName"
+                "appRoles"
+            ) `
+            -All
+    )
+}
+
+if ($DefenderServicePrincipals.Count -eq 1) {
+    $DefenderServicePrincipal = $DefenderServicePrincipals[0]
+}
+elseif ($DefenderServicePrincipals.Count -gt 1) {
+    Write-Host "`nMultiple WindowsDefenderATP service principals found:" `
+        -ForegroundColor Yellow
+
+    $DefenderServicePrincipals |
+        Select-Object DisplayName, AppId, Id |
+        Format-Table -AutoSize
+
+    throw "Unable to uniquely identify the WindowsDefenderATP service principal."
+}
+else {
+    Write-Warning @"
+The WindowsDefenderATP enterprise application was not found in this tenant.
+
+Confirm that Microsoft Defender for Endpoint is provisioned and that the
+WindowsDefenderATP service principal exists under:
+
+Microsoft Entra admin center
+> Enterprise applications
+> All applications
+> WindowsDefenderATP
+"@
+
+    $DefenderServicePrincipal = $null
+}
+
+if ($DefenderServicePrincipal) {
+    Write-Host "`nDefender resource: $($DefenderServicePrincipal.DisplayName)"
+    Write-Host "Defender App ID:   $($DefenderServicePrincipal.AppId)"
+    Write-Host "Defender SP ID:    $($DefenderServicePrincipal.Id)"
+}
+
+############################################################
+# Assign Microsoft Graph permissions
+############################################################
+
+Grant-ServicePrincipalAppRoles `
+    -Principal $ManagedIdentity `
+    -ResourceServicePrincipal $GraphServicePrincipal `
+    -Permissions $GraphPermissions `
+    -ResourceName "Microsoft Graph"
+
+############################################################
+# Assign Defender for Endpoint permissions
+############################################################
+
+if ($DefenderServicePrincipal) {
+    Grant-ServicePrincipalAppRoles `
+        -Principal $ManagedIdentity `
+        -ResourceServicePrincipal $DefenderServicePrincipal `
+        -Permissions $DefenderPermissions `
+        -ResourceName "WindowsDefenderATP"
+}
+
+############################################################
+# Verification
+############################################################
+
+Write-Host "`nVerifying assigned application permissions..." `
+    -ForegroundColor Cyan
+
+$AllAssignments = @(
+    Get-MgServicePrincipalAppRoleAssignment `
+        -ServicePrincipalId $ManagedIdentity.Id `
+        -All
+)
+
+$Resources = @($GraphServicePrincipal)
+
+if ($DefenderServicePrincipal) {
+    $Resources += $DefenderServicePrincipal
+}
+
+$VerificationResults = foreach ($Resource in $Resources) {
+    $ResourceAssignments = $AllAssignments |
+        Where-Object {
+            $_.ResourceId -eq $Resource.Id
+        }
+
+    foreach ($Assignment in $ResourceAssignments) {
+        $Role = $Resource.AppRoles |
+            Where-Object {
+                $_.Id -eq $Assignment.AppRoleId
+            } |
+            Select-Object -First 1
+
+        [PSCustomObject]@{
+            Resource   = $Resource.DisplayName
+            Permission = if ($Role) {
+                $Role.Value
+            }
+            else {
+                "Unknown role: $($Assignment.AppRoleId)"
+            }
+            AppRoleId  = $Assignment.AppRoleId
+        }
+    }
+}
+
+$VerificationResults |
+    Sort-Object Resource, Permission |
+    Format-Table -AutoSize
+
+Write-Host "`nPermission assignment processing complete." `
+    -ForegroundColor Green
+
+Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
