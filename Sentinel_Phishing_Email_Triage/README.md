@@ -58,7 +58,7 @@ The managed identity requires permissions to:
 
 Click the button below to deploy the Logic App into your Azure subscription.
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpaulsonsunny19%2FSentinel_Playbooks%2Fmain%2FSentinel_Phishing_Email_Triage%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpaulsonsunny19%2FSentinel_Playbooks%2Fmain%2FSentinel_Phishing_Email_Triage%2FEmailtriage.json)
 
 ---
 
