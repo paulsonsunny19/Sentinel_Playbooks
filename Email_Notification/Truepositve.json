@@ -1,0 +1,234 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "logicAppName": {
+            "type": "string",
+            "defaultValue": "Email_notification_TruePositive",
+            "metadata": {
+                "description": "Name of the Microsoft Sentinel playbook Logic App."
+            }
+        },
+        "sentinelConnectionName": {
+            "type": "string",
+            "defaultValue": "azuresentinel",
+            "metadata": {
+                "description": "Name of an existing Microsoft Sentinel API connection in the deployment resource group."
+            }
+        },
+        "office365ConnectionName": {
+            "type": "string",
+            "defaultValue": "office365",
+            "metadata": {
+                "description": "Name of an existing Office 365 Outlook API connection in the deployment resource group."
+            }
+        },
+        "socEmail": {
+            "type": "string",
+            "metadata": {
+                "description": "SOC mailbox that receives a copy of the notification."
+            }
+        }
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('logicAppName')]",
+            "location": "[resourceGroup().location]",
+            "tags": {
+                "Application": "Sentinel",
+                "Created By": "SOC_Team"
+            },
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "metadata": {
+                        "notes": {}
+                    },
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        },
+                        "socEmail": {
+                            "type": "String"
+                        }
+                    },
+                    "triggers": {
+                        "Microsoft_Sentinel_incident": {
+                            "type": "ApiConnectionWebhook",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "body": {
+                                    "callback_url": "@listCallbackUrl()"
+                                },
+                                "path": "/incident-creation"
+                            }
+                        }
+                    },
+                    "actions": {
+                        "Entities_-_Get_Accounts": {
+                            "runAfter": {},
+                            "type": "ApiConnection",
+                            "inputs": {
+                                "host": {
+                                    "connection": {
+                                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                                    }
+                                },
+                                "method": "post",
+                                "body": "@triggerBody()?['object']?['properties']?['relatedEntities']",
+                                "path": "/entities/account"
+                            }
+                        },
+                        "Initialize_variables": {
+                            "runAfter": {
+                                "Entities_-_Get_Accounts": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "UserEmail",
+                                        "type": "string"
+                                    }
+                                ]
+                            }
+                        },
+                        "Parse_JSON": {
+                            "runAfter": {
+                                "Initialize_variables-copy": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('Entities_-_Get_Accounts')?['Accounts']",
+                                "schema": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object"
+                                    }
+                                }
+                            }
+                        },
+                        "For_each": {
+                            "foreach": "@body('Parse_JSON')",
+                            "actions": {
+                                "Set_variable": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "UserEmail",
+                                        "value": "@coalesce(item()?['additionalData']?['MailAddress'], item()?['additionalData']?['UserPrincipalName'])"
+                                    }
+                                },
+                                "For_each_1": {
+                                    "foreach": "@body('Entities_-_Get_Accounts')?['Accounts']",
+                                    "actions": {
+                                        "Send_an_email_(V2)": {
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['office365']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "post",
+                                                "body": {
+                                                    "To": "@{concat(parameters('socEmail'), '; ', variables('UserEmail'))}",
+                                                    "Subject": "@{triggerBody()?['object']?['properties']?['title']} ",
+                                                    "Body": "<p class=\"editor-paragraph\">Hi , @{variables('UserDisplayName')}.<br><br>Thank you for submitting the suspicious email for review.<br>Following our analysis, we can confirm that the message you reported was indeed a phishing attempt. Your prompt action in identifying and reporting the email helped prevent a potential security incident and contributed to maintaining the security posture of our organisation.</p><p class=\"editor-paragraph\"><br><b><strong class=\"editor-text-bold\">Summary of Findings</strong></b><br>• The email originated from an untrusted or spoofed source.<br>• The content contained indicators commonly associated with phishing attempts.<br>• The sender’s intention appeared to be to obtain sensitive information or compromise systems.</p><p class=\"editor-paragraph\"><br><b><strong class=\"editor-text-bold\">Next Steps</strong></b></p><p class=\"editor-paragraph\">No further action is required on your part. The Security Operations Centre has taken the appropriate measures to block the sender and mitigate any associated risks.<br><br>We appreciate your diligence and encourage you to continue reporting any emails that appear suspicious.<br><br>Regards,<br>Ergo SOC Team.</p>",
+                                                    "Importance": "Normal"
+                                                },
+                                                "path": "/v2/Mail"
+                                            }
+                                        }
+                                    },
+                                    "runAfter": {
+                                        "Set_variable-copy": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "Foreach"
+                                },
+                                "Set_variable-copy": {
+                                    "runAfter": {
+                                        "Set_variable": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                        "name": "UserDisplayName",
+                                        "value": "@coalesce(item()?['displayName'])"
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "Parse_JSON": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Foreach"
+                        },
+                        "Initialize_variables-copy": {
+                            "runAfter": {
+                                "Initialize_variables": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "UserDisplayName",
+                                        "type": "string"
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "azuresentinel": {
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]",
+                                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('sentinelConnectionName'))]",
+                                "connectionName": "[parameters('sentinelConnectionName')]",
+                                "connectionProperties": {
+                                    "authentication": {
+                                        "type": "ManagedServiceIdentity"
+                                    }
+                                }
+                            },
+                            "office365": {
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/office365')]",
+                                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('office365ConnectionName'))]",
+                                "connectionName": "[parameters('office365ConnectionName')]",
+                                "connectionProperties": {}
+                            }
+                        }
+                    },
+                    "socEmail": {
+                        "value": "[parameters('socEmail')]"
+                    }
+                }
+            }
+        }
+    ]
+}
