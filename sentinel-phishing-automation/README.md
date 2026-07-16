@@ -62,10 +62,10 @@ The Office 365 API connection must be authorized after deployment if it is not a
 
 ## Deployment
 
+
 Click the button below to deploy the Logic App into your Azure subscription.
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpaulsonsunny19%2Fsentinel-phishing-automation%2Fmain%2FSOC-Phishing-Autoclose-consolidated.json)
-
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpaulsonsunny19%2FSentinel_Playbooks%2Fmain%2Fsentinel-phishing-automation%2FSOC-Phishing-Autoclose-consolidated.json)
 ---
 
 ## Deployment Parameters
