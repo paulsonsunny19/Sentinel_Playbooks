@@ -52,7 +52,7 @@
             "name": "[parameters('logicAppName')]",
             "location": "[resourceGroup().location]",
             "tags": {
-                "Created By": "ADMDanilo",
+                "Created By": "soc",
                 "Application": "Sentinel"
             },
             "identity": {
