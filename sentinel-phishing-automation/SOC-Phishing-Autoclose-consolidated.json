@@ -1,0 +1,594 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "SOC-Phishing-Autoclose",
+      "metadata": {
+        "description": "Name of the Logic App workflow."
+      }
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace used by Microsoft Sentinel."
+      }
+    },
+    "sentinelConnectionName": {
+      "type": "string",
+      "defaultValue": "azuresentinel",
+      "metadata": {
+        "description": "Name of the existing Microsoft Sentinel API connection."
+      }
+    },
+    "azureMonitorLogsConnectionName": {
+      "type": "string",
+      "defaultValue": "azuremonitorlogs",
+      "metadata": {
+        "description": "Name of the existing Azure Monitor Logs API connection."
+      }
+    },
+    "office365ConnectionName": {
+      "type": "string",
+      "defaultValue": "office365",
+      "metadata": {
+        "description": "Name of the existing Office 365 Outlook API connection."
+      }
+    },
+    "managedIdentityName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the existing user-assigned managed identity."
+      }
+    },
+    "notificationEmail": {
+      "type": "string",
+      "metadata": {
+        "description": "Email address that receives auto-close notifications."
+      }
+    },
+    "resourceTags": {
+      "type": "object",
+      "defaultValue": {
+        "applicationName": "Microsoft Sentinel",
+        "description": "Phishing incident auto-close workflow",
+        "environment": "Shared"
+      },
+      "metadata": {
+        "description": "Tags applied to the Logic App."
+      }
+    }
+  },
+  "variables": {
+    "managedIdentityResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.ManagedIdentity/userAssignedIdentities', parameters('managedIdentityName'))]",
+    "sentinelConnectionResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.Web/connections', parameters('sentinelConnectionName'))]",
+    "azureMonitorLogsConnectionResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.Web/connections', parameters('azureMonitorLogsConnectionName'))]",
+    "office365ConnectionResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.Web/connections', parameters('office365ConnectionName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2017-07-01",
+      "name": "[parameters('logicAppName')]",
+      "location": "[deployment().location]",
+      "tags": "[parameters('resourceTags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[variables('managedIdentityResourceId')]": {}
+        }
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            }
+          },
+          "triggers": {
+            "Microsoft_Sentinel_incident": {
+              "type": "ApiConnectionWebhook",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azuresentinel-1']['connectionId']"
+                  }
+                },
+                "body": {
+                  "callback_url": "@listCallbackUrl()"
+                },
+                "path": "/incident-creation"
+              }
+            }
+          },
+          "actions": {
+            "Initialize_variables-copy": {
+              "runAfter": {},
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "NetworkmsgID",
+                    "type": "string"
+                  },
+                  {
+                    "name": "Sender",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "Parse_JSON-copy": {
+              "runAfter": {
+                "Initialize_variables-copy": [
+                  "Succeeded"
+                ]
+              },
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@triggerBody()?['object']?['properties']?['relatedEntities']",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string"
+                      },
+                      "properties": {
+                        "type": "object",
+                        "properties": {
+                          "mailboxPrimaryAddress": {
+                            "type": "string"
+                          },
+                          "friendlyName": {
+                            "type": "string"
+                          },
+                          "accountName": {
+                            "type": "string"
+                          },
+                          "upnSuffix": {
+                            "type": "string"
+                          },
+                          "recipient": {
+                            "type": "string"
+                          },
+                          "p1Sender": {
+                            "type": "string"
+                          },
+                          "senderIP": {
+                            "type": "string"
+                          },
+                          "receiveDate": {
+                            "type": "string"
+                          },
+                          "networkMessageId": {
+                            "type": "string"
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "Filter_array": {
+              "runAfter": {
+                "Parse_JSON-copy": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Query",
+              "inputs": {
+                "from": "@body('Parse_JSON-copy')",
+                "where": "@and(equals(item()?['kind'], 'MailMessage'), not(empty(item()?['properties']?['networkMessageId'])))"
+              }
+            },
+            "For_each": {
+              "foreach": "@body('Filter_array')",
+              "actions": {
+                "MessageID": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "NetworkmsgID",
+                    "value": "@items('For_each')?['properties']?['networkMessageId']"
+                  }
+                },
+                "Run_query_and_list_results": {
+                  "runAfter": {
+                    "MessageID": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": "EmailEvents\n| where TimeGenerated > ago(14d)\n| where NetworkMessageId == \"@{variables('NetworkmsgID')}\"\n| summarize by RecipientEmailAddress,SenderFromAddress",
+                    "path": "/queryData",
+                    "queries": {
+                      "subscriptions": "[subscription().subscriptionId]",
+                      "resourcegroups": "[resourceGroup().name]",
+                      "resourcetype": "Log Analytics Workspace",
+                      "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                      "timerange": "Set in query"
+                    }
+                  }
+                },
+                "Parse_JSON": {
+                  "runAfter": {
+                    "Run_query_and_list_results": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@body('Run_query_and_list_results')?['value']",
+                    "schema": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "RecipientEmailAddress": {
+                            "type": "string"
+                          },
+                          "SenderFromAddress": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "RecipientEmailAddress",
+                          "SenderFromAddress"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "For_each_1": {
+                  "foreach": "@outputs('Parse_JSON')['body']",
+                  "actions": {
+                    "Set_variable": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "Sender",
+                        "value": "@items('For_each_1')['SenderFromAddress']"
+                      }
+                    },
+                    "Run_query_and_list_results-copy": {
+                      "runAfter": {
+                        "Set_variable": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "body": "EmailEvents\n| where TimeGenerated > ago(14d)\n| where SenderFromAddress ==\"@{variables('Sender')}\"\n| summarize dcount(RecipientEmailAddress)",
+                        "path": "/queryData",
+                        "queries": {
+                          "subscriptions": "[subscription().subscriptionId]",
+                          "resourcegroups": "[resourceGroup().name]",
+                          "resourcetype": "Log Analytics Workspace",
+                          "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                          "timerange": "Set in query"
+                        }
+                      }
+                    },
+                    "Parse_JSON_1": {
+                      "runAfter": {
+                        "Run_query_and_list_results-copy": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "ParseJson",
+                      "inputs": {
+                        "content": "@body('Run_query_and_list_results-copy')?['value']",
+                        "schema": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "dcount_RecipientEmailAddress": {
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "dcount_RecipientEmailAddress"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "For_each_2": {
+                      "foreach": "@outputs('Parse_JSON_1')['body']",
+                      "actions": {
+                        "Condition": {
+                          "actions": {
+                            "URlclick_-_From_Same_Sender": {
+                              "type": "ApiConnection",
+                              "inputs": {
+                                "host": {
+                                  "connection": {
+                                    "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                                  }
+                                },
+                                "method": "post",
+                                "body": "UrlClickEvents\n| where TimeGenerated > ago(14d)\n| join EmailEvents on NetworkMessageId\n| where SenderFromAddress ==\"@{variables('Sender')}\"\n| summarize dcount(AccountUpn)",
+                                "path": "/queryData",
+                                "queries": {
+                                  "subscriptions": "[subscription().subscriptionId]",
+                                  "resourcegroups": "[resourceGroup().name]",
+                                  "resourcetype": "Log Analytics Workspace",
+                                  "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                                  "timerange": "Set in query"
+                                }
+                              }
+                            },
+                            "URLClicks": {
+                              "runAfter": {
+                                "URlclick_-_From_Same_Sender": [
+                                  "Succeeded"
+                                ]
+                              },
+                              "type": "ParseJson",
+                              "inputs": {
+                                "content": "@body('URlclick_-_From_Same_Sender')?['value']",
+                                "schema": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "dcount_AccountUpn": {
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "dcount_AccountUpn"
+                                    ]
+                                  }
+                                }
+                              }
+                            },
+                            "For_each_3": {
+                              "foreach": "@outputs('URLClicks')['body']",
+                              "actions": {
+                                "Condition_1": {
+                                  "actions": {
+                                    "Update_incident_1": {
+                                      "type": "ApiConnection",
+                                      "inputs": {
+                                        "host": {
+                                          "connection": {
+                                            "name": "@parameters('$connections')['azuresentinel-1']['connectionId']"
+                                          }
+                                        },
+                                        "method": "put",
+                                        "body": {
+                                          "incidentArmId": "@triggerBody()?['object']?['id']",
+                                          "tagsToAdd": {
+                                            "TagsToAdd": [
+                                              {
+                                                "Tag": "URL Click"
+                                              }
+                                            ]
+                                          },
+                                          "severity": "High",
+                                          "status": "Active"
+                                        },
+                                        "path": "/Incidents"
+                                      }
+                                    }
+                                  },
+                                  "else": {
+                                    "actions": {
+                                      "Update_incident_2": {
+                                        "type": "ApiConnection",
+                                        "inputs": {
+                                          "host": {
+                                            "connection": {
+                                              "name": "@parameters('$connections')['azuresentinel-1']['connectionId']"
+                                            }
+                                          },
+                                          "method": "put",
+                                          "body": {
+                                            "incidentArmId": "@triggerBody()?['object']?['id']",
+                                            "tagsToAdd": {
+                                              "TagsToAdd": [
+                                                {
+                                                  "Tag": "Single_Recipient"
+                                                },
+                                                {
+                                                  "Tag": "No_URL_CLicks"
+                                                }
+                                              ]
+                                            },
+                                            "severity": "Low",
+                                            "status": "Closed",
+                                            "classification": {
+                                              "ClassificationAndReason": "TruePositive - SuspiciousActivity",
+                                              "ClassificationReasonText": "Emails were send to single user , No URL clicks , No further actions needed "
+                                            }
+                                          },
+                                          "path": "/Incidents"
+                                        }
+                                      },
+                                      "Send_an_email_(V2)": {
+                                        "runAfter": {
+                                          "Update_incident_2": [
+                                            "Succeeded"
+                                          ]
+                                        },
+                                        "type": "ApiConnection",
+                                        "inputs": {
+                                          "host": {
+                                            "connection": {
+                                              "name": "@parameters('$connections')['office365']['connectionId']"
+                                            }
+                                          },
+                                          "method": "post",
+                                          "body": {
+                                            "To": "[parameters('notificationEmail')]",
+                                            "Subject": "Email Auto Closed - Test",
+                                            "Body": "<p class=\"editor-paragraph\">Incident ID: @{triggerBody()?['object']?['properties']?['providerIncidentId']}<br>Email from @{variables('Sender')} ,<br><br>This Incident was Auto closed as the email was sent to only one user and the user reported it , there is no URL clicks</p>",
+                                            "Importance": "Normal"
+                                          },
+                                          "path": "/v2/Mail"
+                                        }
+                                      }
+                                    }
+                                  },
+                                  "expression": {
+                                    "and": [
+                                      {
+                                        "greater": [
+                                          "@item()['dcount_AccountUpn']",
+                                          0
+                                        ]
+                                      }
+                                    ]
+                                  },
+                                  "type": "If"
+                                }
+                              },
+                              "runAfter": {
+                                "URLClicks": [
+                                  "Succeeded"
+                                ]
+                              },
+                              "type": "Foreach"
+                            }
+                          },
+                          "else": {
+                            "actions": {
+                              "Update_incident": {
+                                "type": "ApiConnection",
+                                "inputs": {
+                                  "host": {
+                                    "connection": {
+                                      "name": "@parameters('$connections')['azuresentinel-1']['connectionId']"
+                                    }
+                                  },
+                                  "method": "put",
+                                  "body": {
+                                    "incidentArmId": "@triggerBody()?['object']?['id']",
+                                    "tagsToAdd": {
+                                      "TagsToAdd": [
+                                        {
+                                          "Tag": "Multiple Recipients"
+                                        }
+                                      ]
+                                    },
+                                    "severity": "Medium",
+                                    "status": "Active"
+                                  },
+                                  "path": "/Incidents"
+                                }
+                              }
+                            }
+                          },
+                          "expression": {
+                            "and": [
+                              {
+                                "equals": [
+                                  "@items('For_each_2')['dcount_RecipientEmailAddress']",
+                                  1
+                                ]
+                              }
+                            ]
+                          },
+                          "type": "If"
+                        }
+                      },
+                      "runAfter": {
+                        "Parse_JSON_1": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Foreach"
+                    }
+                  },
+                  "runAfter": {
+                    "Parse_JSON": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Foreach"
+                }
+              },
+              "runAfter": {
+                "Filter_array": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Foreach"
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "azuresentinel-1": {
+                "id": "[subscriptionResourceId(subscription().subscriptionId, 'Microsoft.Web/locations/managedApis', deployment().location, 'azuresentinel')]",
+                "connectionId": "[variables('sentinelConnectionResourceId')]",
+                "connectionName": "[parameters('sentinelConnectionName')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "identity": "[variables('managedIdentityResourceId')]"
+                  }
+                }
+              },
+              "azuremonitorlogs": {
+                "id": "[subscriptionResourceId(subscription().subscriptionId, 'Microsoft.Web/locations/managedApis', deployment().location, 'azuremonitorlogs')]",
+                "connectionId": "[variables('azureMonitorLogsConnectionResourceId')]",
+                "connectionName": "[parameters('azureMonitorLogsConnectionName')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "identity": "[variables('managedIdentityResourceId')]"
+                  }
+                }
+              },
+              "office365": {
+                "id": "[subscriptionResourceId(subscription().subscriptionId, 'Microsoft.Web/locations/managedApis', deployment().location, 'office365')]",
+                "connectionId": "[variables('office365ConnectionResourceId')]",
+                "connectionName": "[parameters('office365ConnectionName')]",
+                "connectionProperties": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
