@@ -1,0 +1,511 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.1.0.0",
+  "parameters": {
+    "workflowName": {
+      "type": "string",
+      "defaultValue": "SOC-Phishing-Triage",
+      "metadata": {
+        "description": "Name of the Logic App workflow."
+      }
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace containing Microsoft Defender XDR tables."
+      }
+    },
+    "userAssignedIdentityName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the existing user-assigned managed identity used by the Logic App connections."
+      }
+    },
+    "sentinelConnectionName": {
+      "type": "string",
+      "defaultValue": "azuresentinel",
+      "metadata": {
+        "description": "Name of the Microsoft Sentinel API connection that will be created."
+      }
+    },
+    "azureMonitorLogsConnectionName": {
+      "type": "string",
+      "defaultValue": "azuremonitorlogs",
+      "metadata": {
+        "description": "Name of the Azure Monitor Logs API connection that will be created."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Optional tags applied to the Logic App."
+      }
+    }
+  },
+  "variables": {
+    "userAssignedIdentityResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.ManagedIdentity/userAssignedIdentities', parameters('userAssignedIdentityName'))]",
+    "sentinelConnectionResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.Web/connections', parameters('sentinelConnectionName'))]",
+    "azureMonitorLogsConnectionResourceId": "[resourceId(subscription().subscriptionId, resourceGroup().name, 'Microsoft.Web/connections', parameters('azureMonitorLogsConnectionName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[parameters('sentinelConnectionName')]",
+      "location": "[deployment().location]",
+      "properties": {
+        "displayName": "[parameters('sentinelConnectionName')]",
+        "parameterValueType": "Alternative",
+        "api": {
+          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', deployment().location, 'azuresentinel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[parameters('azureMonitorLogsConnectionName')]",
+      "location": "[deployment().location]",
+      "properties": {
+        "displayName": "[parameters('azureMonitorLogsConnectionName')]",
+        "parameterValueType": "Alternative",
+        "api": {
+          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', deployment().location, 'azuremonitorlogs')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('workflowName')]",
+      "location": "[deployment().location]",
+      "tags": "[parameters('tags')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[variables('userAssignedIdentityResourceId')]": {}
+        }
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "metadata": {
+            "notes": {}
+          },
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            }
+          },
+          "triggers": {
+            "Microsoft_Sentinel_incident": {
+              "type": "ApiConnectionWebhook",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azuresentinel-3']['connectionId']"
+                  }
+                },
+                "body": {
+                  "callback_url": "@{listCallbackUrl()}"
+                },
+                "path": "/incident-creation"
+              }
+            }
+          },
+          "actions": {
+            "Parse_JSON": {
+              "runAfter": {
+                "Initialize_variables": [
+                  "Succeeded"
+                ]
+              },
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@triggerBody()?['object']?['properties']?['relatedEntities']",
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      },
+                      "kind": {
+                        "type": "string"
+                      },
+                      "properties": {
+                        "type": "object",
+                        "properties": {
+                          "mailboxPrimaryAddress": {
+                            "type": "string"
+                          },
+                          "friendlyName": {
+                            "type": "string"
+                          },
+                          "accountName": {
+                            "type": "string"
+                          },
+                          "upnSuffix": {
+                            "type": "string"
+                          },
+                          "recipient": {
+                            "type": "string"
+                          },
+                          "p1Sender": {
+                            "type": "string"
+                          },
+                          "senderIP": {
+                            "type": "string"
+                          },
+                          "receiveDate": {
+                            "type": "string"
+                          },
+                          "networkMessageId": {
+                            "type": "string"
+                          },
+                          "internetMessageId": {
+                            "type": "string"
+                          },
+                          "subject": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "Initialize_variables": {
+              "runAfter": {},
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "NetworkmsgID",
+                    "type": "string"
+                  }
+                ]
+              }
+            },
+            "Filter_array-copy": {
+              "runAfter": {
+                "Parse_JSON": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Query",
+              "inputs": {
+                "from": "@body('Parse_JSON')",
+                "where": "@and(equals(item()?['kind'], 'MailMessage'), not(empty(item()?['properties']?['networkMessageId'])))"
+              }
+            },
+            "For_each": {
+              "foreach": "@body('Filter_array-copy')",
+              "actions": {
+                "Set_variable": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "NetworkmsgID",
+                    "value": "@items('For_each')?['properties']?['networkMessageId']"
+                  }
+                },
+                "Recipient_Email_List": {
+                  "runAfter": {
+                    "Set_variable": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": "EmailEvents\n| where TimeGenerated > ago(14d)\n| where NetworkMessageId == \"@{variables('NetworkmsgID')}\"\n| summarize by RecipientEmailAddress,SenderFromAddress",
+                    "path": "/queryData",
+                    "queries": {
+                      "subscriptions": "[subscription().subscriptionId]",
+                      "resourcegroups": "[resourceGroup().name]",
+                      "resourcetype": "Log Analytics Workspace",
+                      "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                      "timerange": "Set in query"
+                    }
+                  }
+                },
+                "URL_Clicks": {
+                  "runAfter": {
+                    "Set_variable": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": "UrlClickEvents\n| where TimeGenerated > ago(14d)\n| where NetworkMessageId == \"@{variables('NetworkmsgID')}\"\n| summarize arg_max(TimeGenerated,*) by AccountUpn\n| project AccountUpn,TimeGenerated",
+                    "path": "/queryData",
+                    "queries": {
+                      "subscriptions": "[subscription().subscriptionId]",
+                      "resourcegroups": "[resourceGroup().name]",
+                      "resourcetype": "Log Analytics Workspace",
+                      "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                      "timerange": "Set in query"
+                    }
+                  }
+                },
+                "Email_Information_": {
+                  "runAfter": {
+                    "Set_variable": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": "EmailAttachmentInfo\n| where TimeGenerated > ago(14d)\n| where NetworkMessageId == \"@{variables('NetworkmsgID')}\"\n| summarize arg_max(TimeGenerated,*) by SHA256\n| project FileName,FileExtension,FileSize",
+                    "path": "/queryData",
+                    "queries": {
+                      "subscriptions": "[subscription().subscriptionId]",
+                      "resourcegroups": "[resourceGroup().name]",
+                      "resourcetype": "Log Analytics Workspace",
+                      "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                      "timerange": "Set in query"
+                    }
+                  }
+                },
+                "Add_comment_to_incident_(V3)": {
+                  "runAfter": {
+                    "Recipient_EmailC": [
+                      "Succeeded"
+                    ],
+                    "Email_attachment": [
+                      "Succeeded"
+                    ],
+                    "URL_Click_Compose": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuresentinel-3']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": {
+                      "incidentArmId": "@triggerBody()?['object']?['id']",
+                      "message": "<p class=\"editor-paragraph\">Recipients</p><p class=\"editor-paragraph\">@{outputs('Recipient_EmailC')}</p>"
+                    },
+                    "path": "/Incidents/Comment"
+                  }
+                },
+                "Create_HTML_table": {
+                  "runAfter": {
+                    "Recipient_Email_List": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Table",
+                  "inputs": {
+                    "from": "@body('Recipient_Email_List')?['value']",
+                    "format": "HTML"
+                  }
+                },
+                "Recipient_EmailC": {
+                  "runAfter": {
+                    "Create_HTML_table": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@body('Create_HTML_table')"
+                },
+                "Create_HTML_table-copy-copy": {
+                  "runAfter": {
+                    "Email_Information_": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Table",
+                  "inputs": {
+                    "from": "@body('Email_Information_')?['value']",
+                    "format": "HTML"
+                  }
+                },
+                "Email_attachment": {
+                  "runAfter": {
+                    "Create_HTML_table-copy-copy": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@body('Create_HTML_table-copy-copy')"
+                },
+                "Create_HTML_table-copy": {
+                  "runAfter": {
+                    "URL_Clicks": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Table",
+                  "inputs": {
+                    "from": "@body('URL_Clicks')?['value']",
+                    "format": "HTML"
+                  }
+                },
+                "URL_Click_Compose": {
+                  "runAfter": {
+                    "Create_HTML_table-copy": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@body('Create_HTML_table-copy')"
+                },
+                "Update_incident": {
+                  "runAfter": {
+                    "Add_comment_to_incident_(V3)": [
+                      "Succeeded"
+                    ],
+                    "Email_Sender_Details_": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuresentinel-3']['connectionId']"
+                      }
+                    },
+                    "method": "put",
+                    "body": {
+                      "incidentArmId": "@triggerBody()?['object']?['id']",
+                      "description": "**Email Sender Details **\n@{outputs('Email_Sender_Details_')}\n\n**URL Clicks**\n@{outputs('URL_Click_Compose')}\n\n**Attachments**\n@{outputs('Email_attachment')}"
+                    },
+                    "path": "/Incidents"
+                  }
+                },
+                "Email_Information": {
+                  "runAfter": {
+                    "Set_variable": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "body": "EmailEvents\n| where TimeGenerated > ago(14d)\n| where NetworkMessageId == \"@{variables('NetworkmsgID')}\"\n| summarize arg_max(TimeGenerated,*) by NetworkMessageId\n| extend CompAuth_ = tostring(parse_json(AuthenticationDetails).CompAuth)\n| extend DKIM_ = tostring(parse_json(AuthenticationDetails).DKIM)\n| extend DMARC_ = tostring(parse_json(AuthenticationDetails).DMARC)\n| extend SPF_ = tostring(parse_json(AuthenticationDetails).SPF)\n| project CompAuth_,DKIM_,DMARC_,SPF_,SenderFromAddress,Subject,IsFirstContact",
+                    "path": "/queryData",
+                    "queries": {
+                      "subscriptions": "[subscription().subscriptionId]",
+                      "resourcegroups": "[resourceGroup().name]",
+                      "resourcetype": "Log Analytics Workspace",
+                      "resourcename": "[parameters('logAnalyticsWorkspaceName')]",
+                      "timerange": "Set in query"
+                    }
+                  }
+                },
+                "Create_HTML_table-copy-copy-copy": {
+                  "runAfter": {
+                    "Email_Information": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Table",
+                  "inputs": {
+                    "from": "@body('Email_Information')?['value']",
+                    "format": "HTML"
+                  }
+                },
+                "Email_Sender_Details_": {
+                  "runAfter": {
+                    "Create_HTML_table-copy-copy-copy": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@body('Create_HTML_table-copy-copy-copy')"
+                }
+              },
+              "runAfter": {
+                "Filter_array-copy": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Foreach"
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "azuresentinel-3": {
+                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', deployment().location, 'azuresentinel')]",
+                "connectionId": "[variables('sentinelConnectionResourceId')]",
+                "connectionName": "[parameters('sentinelConnectionName')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "identity": "[variables('userAssignedIdentityResourceId')]"
+                  }
+                }
+              },
+              "azuremonitorlogs": {
+                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', deployment().location, 'azuremonitorlogs')]",
+                "connectionId": "[variables('azureMonitorLogsConnectionResourceId')]",
+                "connectionName": "[parameters('azureMonitorLogsConnectionName')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity",
+                    "identity": "[variables('userAssignedIdentityResourceId')]"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/connections', parameters('sentinelConnectionName'))]",
+        "[resourceId('Microsoft.Web/connections', parameters('azureMonitorLogsConnectionName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "workflowResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('workflowName'))]"
+    }
+  }
+}
